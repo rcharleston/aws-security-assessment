@@ -1,0 +1,16 @@
+{
+  "before": {
+    "pass": 71,
+    "fail": 96,
+    "source": "https://medium.com/@romancharleston/i-built-a-vulnerable-aws-environment-for-my-capstone-class-f30b8e108fa6",
+    "basis": "Published historical CIS scan summary"
+  },
+  "after": {
+    "pass": 76,
+    "fail": 91,
+    "manual": 3,
+    "source": "after-check-summary.csv",
+    "basis": "Aggregated from the original local Prowler CIS export"
+  },
+  "note": "Pass rate excludes MANUAL. Counts are check-result rows, not unique controls or proof of overall compliance."
+}

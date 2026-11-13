@@ -1,0 +1,275 @@
+# HISTORICAL LAB FIXTURE: intentionally insecure; not an active Terraform entrypoint.
+# Do not use in production. Explanatory encryption comments corrected for publication.
+
+# ============================================================
+# Stride Inc. - Vulnerable Environment
+# ============================================================
+# This file represents what Stride's two engineers built in 2023
+# while shipping their B2B SaaS v1. Each misconfiguration has a
+# real shipping decision behind it - not malice, just velocity.
+#
+# Stride didn't get EVERYTHING wrong. A few things were done
+# correctly, either by accident (AWS defaults, tutorial-followed
+# config) or by careful thought. Look for "STRIDE GOT THIS RIGHT"
+# comments to see what an assessment would credit them on.
+#
+# DO NOT use this in production. This is intentionally insecure.
+# ============================================================
+
+terraform {
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+}
+
+provider "aws" {
+  region = "us-east-1"
+}
+
+# ============================================================
+# MISCONFIG #1 - stride-frontend-prod
+# Public S3 bucket hosting the React app
+# Why it exists: Engineer disabled Block Public Access to make
+# static website hosting "just work" without writing a bucket
+# policy. Never added CloudFront in front of it.
+#
+# STRIDE GOT THIS RIGHT: Versioning enabled and access logging
+# configured. Engineer followed an AWS tutorial that included
+# these as best practices, so the bucket isn't completely
+# unmonitored - just publicly readable when it shouldn't be.
+# ============================================================
+
+resource "aws_s3_bucket" "stride_frontend_prod" {
+  bucket        = "stride-frontend-prod-${random_string.suffix.result}"
+  force_destroy = true
+
+  tags = {
+    Project     = "Stride"
+    Environment = "production"
+    Owner       = "engineering"
+  }
+}
+
+# STRIDE GOT THIS RIGHT - versioning enabled
+resource "aws_s3_bucket_versioning" "frontend_prod" {
+  bucket = aws_s3_bucket.stride_frontend_prod.id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+# STRIDE GOT THIS RIGHT - access logging to a separate bucket
+resource "aws_s3_bucket" "stride_access_logs" {
+  bucket        = "stride-access-logs-${random_string.suffix.result}"
+  force_destroy = true
+
+  tags = {
+    Project = "Stride"
+    Purpose = "s3-access-logging"
+  }
+}
+
+resource "aws_s3_bucket_logging" "frontend_prod" {
+  bucket = aws_s3_bucket.stride_frontend_prod.id
+
+  target_bucket = aws_s3_bucket.stride_access_logs.id
+  target_prefix = "frontend-prod/"
+}
+
+resource "aws_s3_bucket_public_access_block" "frontend_prod" {
+  bucket = aws_s3_bucket.stride_frontend_prod.id
+
+  # MISCONFIGURATION: All four of these should be true for security
+  block_public_acls       = false
+  block_public_policy     = false
+  ignore_public_acls      = false
+  restrict_public_buckets = false
+}
+
+resource "aws_s3_bucket_website_configuration" "frontend_prod" {
+  bucket = aws_s3_bucket.stride_frontend_prod.id
+
+  index_document {
+    suffix = "index.html"
+  }
+}
+
+# ============================================================
+# MISCONFIG #2 - stride-user-uploads
+# Customer file attachments without an explicit IaC encryption configuration
+# Historical scenario assumption: explicit encryption was omitted.
+# AWS default SSE-S3 encryption prevented the intended unencrypted-object condition.
+# ============================================================
+
+resource "aws_s3_bucket" "stride_user_uploads" {
+  bucket        = "stride-user-uploads-${random_string.suffix.result}"
+  force_destroy = true
+
+  tags = {
+    Project     = "Stride"
+    Environment = "production"
+    DataType    = "customer-files"
+  }
+}
+
+# MISCONFIGURATION: No aws_s3_bucket_server_side_encryption_configuration
+# resource defined - bucket has no default encryption policy.
+# Correction: absence of this Terraform resource does not mean objects are unencrypted.
+# S3 applies default SSE-S3 encryption to new uploads; see docs/findings.md.
+
+# ============================================================
+# MISCONFIG #3 - stride-api-server security group
+# SSH open to the entire internet (0.0.0.0/0)
+# Why it exists: Engineer was working remotely with a dynamic
+# IP and didn't want to update the rule constantly.
+# Meant to lock it down "next week" - 18 months ago.
+# ============================================================
+
+resource "aws_security_group" "stride_api_server" {
+  name        = "stride-api-server"
+  description = "Security group for Stride API server"
+
+  ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    # MISCONFIGURATION: Open to the entire internet
+    cidr_blocks = ["0.0.0.0/0"]
+    description = "SSH access (TODO: restrict to office IP)"
+  }
+
+  ingress {
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+    description = "HTTPS for API"
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Project = "Stride"
+    Owner   = "engineering"
+  }
+}
+
+# ============================================================
+# MISCONFIG #4 - stride-deploy-bot
+# IAM user for GitHub Actions with AdministratorAccess
+# Why it exists: Engineer hit permission errors during early
+# CI/CD development and "just gave it admin to unblock the
+# pipeline." Long-lived access keys stored as a GitHub secret,
+# never rotated. No MFA.
+# ============================================================
+
+resource "aws_iam_user" "stride_deploy_bot" {
+  name = "stride-deploy-bot"
+  path = "/service-accounts/"
+
+  tags = {
+    Purpose = "github-actions-deploys"
+    Owner   = "engineering"
+  }
+}
+
+resource "aws_iam_user_policy_attachment" "deploy_bot_admin" {
+  user       = aws_iam_user.stride_deploy_bot.name
+  # MISCONFIGURATION: AdministratorAccess on a service account
+  policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess"
+}
+
+resource "aws_iam_access_key" "deploy_bot" {
+  user = aws_iam_user.stride_deploy_bot.name
+  # MISCONFIGURATION: Long-lived access keys, never rotated
+}
+
+# ============================================================
+# MISCONFIG #5 - dev-jordan and dev-priya
+# Engineer IAM users with no MFA enforcement
+# Why it exists: Engineers created their own accounts early on,
+# never enforced MFA at the account level. Account password
+# policy is the AWS default - weak.
+#
+# STRIDE GOT THIS RIGHT: Engineers were given PowerUserAccess
+# instead of full AdministratorAccess - a senior engineer pushed
+# back on giving everyone admin "just because." That single push
+# back means the engineer accounts can't directly modify IAM,
+# which limits the blast radius if either is compromised.
+# ============================================================
+
+resource "aws_iam_user" "dev_jordan" {
+  name = "dev-jordan"
+
+  tags = {
+    Role = "engineer"
+    Team = "platform"
+  }
+}
+
+resource "aws_iam_user" "dev_priya" {
+  name = "dev-priya"
+
+  tags = {
+    Role = "engineer"
+    Team = "platform"
+  }
+}
+
+# STRIDE GOT THIS RIGHT - PowerUserAccess scoped below admin
+resource "aws_iam_user_policy_attachment" "jordan_poweruser" {
+  user       = aws_iam_user.dev_jordan.name
+  policy_arn = "arn:aws:iam::aws:policy/PowerUserAccess"
+}
+
+resource "aws_iam_user_policy_attachment" "priya_poweruser" {
+  user       = aws_iam_user.dev_priya.name
+  policy_arn = "arn:aws:iam::aws:policy/PowerUserAccess"
+}
+
+# MISCONFIGURATION: No aws_iam_account_password_policy resource
+# Account uses the default password policy - no complexity,
+# no minimum length, no rotation requirements.
+
+# ============================================================
+# Helpers
+# ============================================================
+
+resource "random_string" "suffix" {
+  length  = 8
+  special = false
+  upper   = false
+}
+
+# ============================================================
+# Outputs - what got created
+# ============================================================
+
+output "frontend_bucket_name" {
+  value = aws_s3_bucket.stride_frontend_prod.id
+}
+
+output "uploads_bucket_name" {
+  value = aws_s3_bucket.stride_user_uploads.id
+}
+
+output "access_logs_bucket_name" {
+  value = aws_s3_bucket.stride_access_logs.id
+}
+
+output "deploy_bot_username" {
+  value = aws_iam_user.stride_deploy_bot.name
+}
+
+output "engineer_users" {
+  value = [aws_iam_user.dev_jordan.name, aws_iam_user.dev_priya.name]
+}
